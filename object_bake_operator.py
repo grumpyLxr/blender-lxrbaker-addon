@@ -280,7 +280,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             if self._current_image_node != None:
                 pass_number = self._num_passes - len(self._pass_queue)
                 status_txt = str.format(
-                    "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass. XXX",
+                    "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
                     pass_number,
                     self._num_passes,
                     self._current_image_node.image.name,

@@ -8,36 +8,34 @@ bl_info = {
     "category": "Render",
 }
 
+import os
 import importlib
 
-addon_folder = "BlenderLxrBakerAddon"
+addon_folder = os.path.basename(os.path.dirname(os.path.realpath(__file__)))
 modules = (
     ".object_bake_operator",
 )
 
-def import_modules():
+def import_modules(reload: bool):
+    """
+    (Re)imports all modules. 
+    If reload is True all modules are reloaded even if they are already imported. This is useful during development.
+    """
+    print(bl_info["name"], ": Importing modules from", addon_folder)
     for mod in modules:
-        importlib.import_module(mod, addon_folder)
+        module = importlib.import_module(mod, addon_folder)
+        if reload:
+            importlib.reload(module)   
 
-def reimport_modules():
-    '''
-    Reimports the modules. Extremely useful while developing the addon.
-    '''
-    for mod in modules:
-        # Reimporting modules during addon development
-        want_reload_module = importlib.import_module(mod, addon_folder)
-        importlib.reload(want_reload_module)   
-
-import_modules()
-reimport_modules()
+import_modules(True)
 
 from . import object_bake_operator
 
 def register():
-    print("Registering Add-on", bl_info["name"])
+    print(bl_info["name"], ": Registering Add-on")
     object_bake_operator.register()
 
 
 def unregister():
-    print("Unregistering Add-on", bl_info["name"])
+    print(bl_info["name"], ": Unregistering Add-on")
     object_bake_operator.unregister()
