@@ -12,10 +12,11 @@ Features:
 
 Select the object you want to bake, go to "Object" and select "Bake Material to Textures (LxrBaker)".
 
- ![Bake one object](doc/bake-object-menu.png)
+<img src="doc/bake-object-menu.png" alt="bake one object operator" width="300"/>
 
-Change the settings and press "OK".
 
- ![Settings of the baking operator](doc/bake-object-options.png)
+ Change the settings and press "OK".
+
+<img src="doc/bake-object-settings.png" alt="bake one object operator settings" width="200"/>
 
 The material of the selected object will then be baked to images.
