@@ -21,7 +21,7 @@ def import_modules(reload: bool):
     (Re)imports all modules. 
     If reload is True all modules are reloaded even if they are already imported. This is useful during development.
     """
-    print(bl_info["name"], ": Importing modules from", addon_folder)
+    print("\U0001f35e", bl_info["name"], ": Importing modules from", addon_folder)
     for mod in modules:
         module = importlib.import_module(mod, addon_folder)
         if reload:
@@ -32,10 +32,10 @@ import_modules(True)
 from . import object_bake_operator
 
 def register():
-    print(bl_info["name"], ": Registering Add-on")
+    print("\U0001f35e", bl_info["name"], ": Registering Add-on")
     object_bake_operator.register()
 
 
 def unregister():
-    print(bl_info["name"], ": Unregistering Add-on")
+    print("\U0001f35e", bl_info["name"], ": Unregistering Add-on")
     object_bake_operator.unregister()
