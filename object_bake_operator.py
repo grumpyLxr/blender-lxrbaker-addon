@@ -1,11 +1,3 @@
-bl_info = {
-    "name": "LxrBaker",
-    "author": "grumpyLxr",
-    "blender": (3, 5, 0),
-    "category": "Render",
-}
-
-
 from enum import Enum
 import re
 from typing import Final, Iterable, Self
@@ -288,7 +280,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             if self._current_image_node != None:
                 pass_number = self._num_passes - len(self._pass_queue)
                 status_txt = str.format(
-                    "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
+                    "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass. XXX",
                     pass_number,
                     self._num_passes,
                     self._current_image_node.image.name,
@@ -462,13 +454,11 @@ def object_texture_bake_menu_draw(menu: Menu, _context: Context) -> None:
 
 
 def register():
-    print("Registering Add-on", bl_info["name"])
     bpy.utils.register_class(LxrObjectBakeOperator)
     bpy.types.VIEW3D_MT_object.append(object_texture_bake_menu_draw)
 
 
 def unregister():
-    print("Unregistering Add-on", bl_info["name"])
     bpy.types.VIEW3D_MT_object.remove(object_texture_bake_menu_draw)
     unregister_class_safe(LxrObjectBakeOperator)
 
@@ -478,10 +468,3 @@ def unregister_class_safe(clazz: bpy_struct) -> None:
         bpy.utils.unregister_class(clazz)
     except RuntimeError as err:
         print("Could not unregister", clazz, ":", err)
-
-
-# This allows you to run the script directly from Blender's Text editor
-# to test the add-on without having to install it.
-if __name__ == "__main__":
-    unregister()
-    register()
