@@ -3,7 +3,6 @@ import re
 from typing import Final, Iterable, Self
 import bpy
 from bpy.types import (
-    bpy_struct,
     Context,
     Event,
     Image,
@@ -33,7 +32,8 @@ class BakingPassConfiguration:
 
 
 class BakingPass(Enum):
-    DIFFUSE = BakingPassConfiguration("DIFFUSE", True, True)
+    DIFFUSE = BakingPassConfiguration("DIFFUSE", False, True)
+    DIFFUSE_WITH_ALPHA = BakingPassConfiguration("DIFFUSE", True, True)
     ROUGHNESS = BakingPassConfiguration("ROUGHNESS", False, False)
     METALLIC = BakingPassConfiguration("METALLIC", False, False)
     NORMAL = BakingPassConfiguration("NORMAL", False, False)
@@ -102,6 +102,7 @@ class LxrObjectBakeOperatorProperties:
     )  # type: ignore
 
     is_diffuse_pass_prop: BoolProperty(name="Diffuse", description="Bake Diffuse pass.")  # type: ignore
+    is_alpha_pass_prop: BoolProperty(name="with alpha", description="Bake Diffuse pass with alpha.")  # type: ignore
     is_roughness_pass_prop: BoolProperty(name="Roughness", description="Bake Roughness pass.")  # type: ignore
     is_metallic_pass_prop: BoolProperty(name="Metallic", description="Bake Metallic pass.")  # type: ignore
     is_normal_pass_prop: BoolProperty(name="Normal", description="Bake Normal pass.")  # type: ignore
@@ -116,6 +117,7 @@ class LxrObjectBakeOperatorProperties:
         self.uv_seam_margin_prop = bpy.context.scene.render.bake_margin
         self.uv_map_prop = "NONE"
         self.is_diffuse_pass_prop = True
+        self.is_alpha_pass_prop = False
         self.is_roughness_pass_prop = True
         self.is_metallic_pass_prop = False
         self.is_normal_pass_prop = True
@@ -123,7 +125,8 @@ class LxrObjectBakeOperatorProperties:
 
     def get_baking_passes(self: Self) -> list[BakingPass]:
         passes = [
-            (self.is_diffuse_pass_prop, BakingPass.DIFFUSE),
+            (self.is_diffuse_pass_prop and not self.is_alpha_pass_prop, BakingPass.DIFFUSE),
+            (self.is_diffuse_pass_prop and self.is_alpha_pass_prop, BakingPass.DIFFUSE_WITH_ALPHA),
             (self.is_roughness_pass_prop, BakingPass.ROUGHNESS),
             (self.is_metallic_pass_prop, BakingPass.METALLIC),
             (self.is_normal_pass_prop, BakingPass.NORMAL),
@@ -157,6 +160,8 @@ class LxrObjectBakeOperatorProperties:
                 self.uv_map_prop = dictionary["uv_map_prop"]
         if dictionary.__contains__("is_diffuse_pass_prop"):
             self.is_diffuse_pass_prop = dictionary["is_diffuse_pass_prop"]
+        if dictionary.__contains__("is_alpha_pass_prop"):
+            self.is_alpha_pass_prop = dictionary["is_alpha_pass_prop"]
         if dictionary.__contains__("is_roughness_pass_prop"):
             self.is_roughness_pass_prop = dictionary["is_roughness_pass_prop"]
         if dictionary.__contains__("is_metallic_pass_prop"):
@@ -177,6 +182,7 @@ class LxrObjectBakeOperatorProperties:
             "uv_seam_margin_prop": self.uv_seam_margin_prop,
             "uv_map_prop": self.uv_map_prop,
             "is_diffuse_pass_prop": self.is_diffuse_pass_prop,
+            "is_alpha_pass_prop": self.is_alpha_pass_prop,
             "is_roughness_pass_prop": self.is_roughness_pass_prop,
             "is_metallic_pass_prop": self.is_metallic_pass_prop,
             "is_normal_pass_prop": self.is_normal_pass_prop,
@@ -201,7 +207,10 @@ class LxrObjectBakeOperatorProperties:
 
         passes_box = layout.box()
         passes_column = passes_box.column(align=False, heading="Baking passes")
-        passes_column.prop(self, "is_diffuse_pass_prop")
+        diffuse_pass_row = passes_column.row()
+        diffuse_pass_row.prop(self, "is_diffuse_pass_prop")
+        if self.is_diffuse_pass_prop:
+            diffuse_pass_row.prop(self, "is_alpha_pass_prop")
         passes_column.prop(self, "is_roughness_pass_prop")
         passes_column.prop(self, "is_metallic_pass_prop")
         passes_column.prop(self, "is_normal_pass_prop")
@@ -335,13 +344,19 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         pass_config = baking_pass.value
         # Create Image:
         img_name: str = self.get_image_name(baking_pass)
-        img: bpy.types.Image = bpy.data.images.get(img_name)
+        img: Image = bpy.data.images.get(img_name)
         # If the image contains no data we cannot reuse it. Thus we rename it and create a new image.
-        if img != None and not img.has_data:
-            old_name = img.name
-            img.name = img.name + "_old"
-            self.report({"WARNING"}, "Image " + old_name + " has no data. Renaming to " + img.name)
-            img = None  # create new image
+        if img != None:
+            if not img.has_data or (img.alpha_mode == "NONE" and pass_config.use_alpha) or img.type != "IMAGE":
+                old_name = img.name
+                img.name = img.name + "_old"
+                self.report(
+                    {"WARNING"},
+                    str.format(
+                        "Image '{}' has invalid data. Renaming to '{}' and creating a new image", old_name, img.name
+                    ),
+                )
+                img = None  # create new image
 
         if img == None:
             img = bpy.data.images.new(
