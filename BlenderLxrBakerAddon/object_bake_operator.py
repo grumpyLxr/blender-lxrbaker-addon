@@ -348,7 +348,8 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         img: Image = bpy.data.images.get(img_name)
         # If the image contains no data we cannot reuse it. Thus we rename it and create a new image.
         if img != None:
-            if not img.has_data or (img.alpha_mode == "NONE" and pass_config.use_alpha) or img.type != "IMAGE":
+            wrong_alpha = pass_config.use_alpha if img.alpha_mode == "NONE" else not pass_config.use_alpha
+            if not img.has_data or wrong_alpha or img.type != "IMAGE":
                 old_name = img.name
                 img.name = img.name + "_old"
                 log.warn(
