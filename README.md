@@ -6,9 +6,16 @@ Features:
  * ❌ Baking the material of multiple object to the same textures
  * ❌ Baking of a high-res object to a low-res object
 
-## How to use
+## How to
 
-### Bake one object
+### Install the Add-on
+
+Got to Edit -> Preferenes, select Add-ons and then on the top right click "Install from Disk...".
+Select `BlenderLxrBakerAddon-1.0.0.zip`.
+
+<img src="doc/install-add-on.png" alt="install the add-on" width="300"/>
+
+### Bake material of one object
 
 Select the object you want to bake, go to "Object" and select "Bake Material to Textures (LxrBaker)".
 
