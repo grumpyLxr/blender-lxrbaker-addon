@@ -18,6 +18,7 @@ from bpy.types import (
     Timer,
 )
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from . import log
 
 
 class BakingPassConfiguration:
@@ -296,7 +297,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
                 )
                 bpy.context.workspace.status_text_set(text=status_txt)
         elif event.type == "ESC" or event.type == "END":
-            self.report({"WARNING"}, "Baking was cancelled.")
+            log.warn(self, "Baking was cancelled.")
             result = {"CANCELLED"}
 
         if "FINISHED" in result or "CANCELLED" in result:
@@ -350,11 +351,8 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             if not img.has_data or (img.alpha_mode == "NONE" and pass_config.use_alpha) or img.type != "IMAGE":
                 old_name = img.name
                 img.name = img.name + "_old"
-                self.report(
-                    {"WARNING"},
-                    str.format(
-                        "Image '{}' has invalid data. Renaming to '{}' and creating a new image", old_name, img.name
-                    ),
+                log.warn(
+                    self, "Image '{}' has invalid data. Renaming to '{}' and creating a new image", old_name, img.name
                 )
                 img = None  # create new image
 
@@ -363,9 +361,9 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
                 img_name, self.image_width_prop, self.image_height_prop, alpha=pass_config.use_alpha
             )
         else:
-            print("Image", img_name, "already exists. Overwriting existing image ...")
+            log.log("Image '{}' already exists. Overwriting existing image ...", img_name)
             if img.size[0] != self.image_width_prop or img.size[1] != self.image_height_prop:
-                print("Scaling image to", self.image_width_prop, "x", self.image_height_prop, "...")
+                log.log("Scaling image to {}x{} ...", self.image_width_prop, self.image_height_prop)
                 # pack the image into the .blend file to not change external image file before the baking.
                 pack_image(img)
                 img.scale(self.image_width_prop, self.image_height_prop)
@@ -385,7 +383,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             node_tree = self.get_target_material().node_tree
             bsdf_node = self.get_principled_bsdf_node(node_tree)
             if bsdf_node == None:
-                self.report({"WARNING"}, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
+                log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
                 return
             self.switch_metallic_and_roughness(node_tree, bsdf_node)
 
@@ -407,7 +405,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     def get_principled_bsdf_node(self: Self, node_tree: ShaderNodeTree) -> ShaderNodeBsdfPrincipled:
         bsdf_nodes = [n for n in node_tree.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"]
         if len(bsdf_nodes) > 1:
-            self.report({"WARNING"}, "Baked metallic pass might be wrong. Found more than one Principled BSDF Node.")
+            log.warn(self, "Baked metallic pass might be wrong. Found more than one Principled BSDF Node.")
         return None if len(bsdf_nodes) == 0 else bsdf_nodes[0]
 
     def switch_metallic_and_roughness(
@@ -438,20 +436,20 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
 
     def save_result_image(self: Self, img: Image) -> None:
         if not img.has_data:
-            self.report({"WARNING"}, "Cannot save image " + img.name + " because it has not data.")
+            log.warn(self, "Cannot save image {} because it has not data.", img.name)
             return
         if self.is_image_save_to_file_prop:
             # We first have to save to an *absolute* path (i.e. not relative to blend file).
             # Then we can set the filepath property on the image. The reload tests if everything worked.
             file_path = self.get_image_path(img.name)
-            print("Saving image", img.name, "to file:", file_path)
+            log.log("Saving image '{}' to file: {}", img.name, file_path)
             img.save(filepath=bpy.path.abspath(file_path))
             if is_image_packed(img):
                 img.unpack(method="REMOVE")
             img.filepath = file_path
             img.reload()
         else:
-            print("Packing image", img.name, "into .blend file.")
+            log.log("Packing image '{}' into .blend file.", img.name)
             pack_image(img)
 
 
