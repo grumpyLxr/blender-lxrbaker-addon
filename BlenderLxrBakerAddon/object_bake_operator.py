@@ -380,6 +380,8 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         bpy.ops.object.bake(
             "INVOKE_DEFAULT",
             type=pass_str,
+            # Only use color for the DIFFUSE pass, no lighting.
+            pass_filter={"COLOR"},
             target="IMAGE_TEXTURES",
             use_clear=True,
             uv_layer=self.uv_map_prop,
@@ -460,11 +462,4 @@ def register():
 
 def unregister():
     bpy.types.VIEW3D_MT_object.remove(object_texture_bake_menu_draw)
-    unregister_class_safe(LxrObjectBakeOperator)
-
-
-def unregister_class_safe(clazz: bpy_struct) -> None:
-    try:
-        bpy.utils.unregister_class(clazz)
-    except RuntimeError as err:
-        print("Could not unregister", clazz, ":", err)
+    bpy.utils.unregister_class(LxrObjectBakeOperator)
