@@ -237,12 +237,16 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     bl_label = "Bake Material to Textures (LxrBaker)"
     bl_options = {"REGISTER"}
 
+    # The interval in seconds between timer events. Do not set this too low because that makes the baking process 
+    # unstable.
+    _TIMER_INTERVAL_SECONDS: float = 2.5
+    
     _CUSTOM_PROP_NAME: Final[str] = "lxrbaker_properties"
     _pass_queue: list[BakingPass] = []
     _num_passes: int = 0
     _running_pass: BakingPass = None
     _timer: Timer = None
-    _current_image_node: ShaderNodeTexImage = None
+    _current_image_nodes: list[tuple[Material, ShaderNodeTexImage]] = []
 
     @classmethod
     def poll(cls, context: Context) -> bool:
@@ -263,8 +267,8 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     def get_target_object(self: Self) -> Object:
         return bpy.data.objects.get(self.target_object_prop)
 
-    def get_target_material(self: Self) -> Material:
-        return self.get_target_object().material_slots[0].material
+    def get_target_materials(self: Self) -> list[Material]:
+        return [m.material for m in self.get_target_object().material_slots if m.material.use_nodes]
 
     def draw(self: Self, _context: Context) -> None:
         self._draw_properties(self.layout)
@@ -287,13 +291,14 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         result: set[str] = {"PASS_THROUGH"}  # default: ignore event
         if event.type == "TIMER":
             result = self.bake_next_pass()
-            if self._current_image_node != None:
+            if len(self._current_image_nodes) > 0:
+                image_names = ",".join(list(set([n[1].image.name for n in self._current_image_nodes])))
                 pass_number = self._num_passes - len(self._pass_queue)
                 status_txt = str.format(
                     "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
                     pass_number,
                     self._num_passes,
-                    self._current_image_node.image.name,
+                    image_names,
                 )
                 bpy.context.workspace.status_text_set(text=status_txt)
         elif event.type == "ESC" or event.type == "END":
@@ -314,7 +319,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         self._num_passes = len(self._pass_queue)
         self._running_pass = None
         context.window_manager.modal_handler_add(self)
-        context.window_manager.event_timer_add(1.0, window=context.window)
+        context.window_manager.event_timer_add(self._TIMER_INTERVAL_SECONDS, window=context.window)
         return {"RUNNING_MODAL"}
 
     def bake_next_pass(self: Self) -> set[str]:
@@ -330,22 +335,64 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         return {"RUNNING_MODAL"}
 
     def cleanup_after_bake(self: Self) -> None:
-        if self._current_image_node != None:
-            self.save_result_image(self._current_image_node.image)
-            self.get_target_material().node_tree.nodes.remove(self._current_image_node)
-            self._current_image_node = None
+        for img in set([i[1].image for i in self._current_image_nodes]):
+            self.save_result_image(img)
+        for img_node_tuple in self._current_image_nodes:
+            img_node_tuple[0].node_tree.nodes.remove(img_node_tuple[1])
+        self._current_image_nodes = []
         if self._running_pass == BakingPass.METALLIC:
-            node_tree = self.get_target_material().node_tree
-            bsdf_node = self.get_principled_bsdf_node(node_tree)
-            if bsdf_node != None:
-                self.switch_metallic_and_roughness(node_tree, bsdf_node)
+            for material in self.get_target_materials():
+                bsdf_node = self.get_principled_bsdf_node(material.node_tree)
+                if bsdf_node != None:
+                    self.switch_metallic_and_roughness(material.node_tree, bsdf_node)
         self._running_pass = None
 
     def bake_image_pass(self: Self, baking_pass: BakingPass) -> None:
         pass_config = baking_pass.value
-        # Create Image:
+
+        # Get or create Image:
         img_name: str = self.get_image_name(baking_pass)
-        img: Image = bpy.data.images.get(img_name)
+        img = self.get_or_create_image(baking_pass, img_name)
+
+        # Create Image Material Nodes:
+        for material in self.get_target_materials():
+            log.log("Creating tex node for material {}", material.name)
+            node_tree = material.node_tree
+            img_node: ShaderNodeTexImage = node_tree.nodes.new("ShaderNodeTexImage")
+            img_node.image = img
+            img_node.select = True
+            node_tree.nodes.active = img_node
+            self._current_image_nodes.append((material, img_node))
+
+            if baking_pass == BakingPass.METALLIC:
+                bsdf_node = self.get_principled_bsdf_node(node_tree)
+                if bsdf_node == None:
+                    log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
+                    return
+                self.switch_metallic_and_roughness(node_tree, bsdf_node)
+
+        # Start Baking:
+        self._running_pass = baking_pass
+        pass_str: str = BakingPass.ROUGHNESS.value.type if baking_pass == BakingPass.METALLIC else pass_config.type
+        bpy.ops.object.bake(
+            "INVOKE_DEFAULT",
+            type=pass_str,
+            # Only use color for the DIFFUSE pass, no lighting.
+            pass_filter={"COLOR"},
+            target="IMAGE_TEXTURES",
+            use_clear=True,
+            uv_layer=self.uv_map_prop,
+            margin=self.uv_seam_margin_prop,
+            margin_type="ADJACENT_FACES",
+        )
+
+    def get_image(self: Self, img_name: str) -> Image:
+        return bpy.data.images.get(img_name)
+
+    def get_or_create_image(self: Self, baking_pass: BakingPass, img_name: str) -> Image:
+        pass_config = baking_pass.value
+        img: Image = self.get_image(img_name)
+
         # If the image contains no data we cannot reuse it. Thus we rename it and create a new image.
         if img != None:
             wrong_alpha = pass_config.use_alpha if img.alpha_mode == "NONE" else not pass_config.use_alpha
@@ -372,36 +419,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
                 pack_image(img)
         img.alpha_mode = "STRAIGHT" if pass_config.use_alpha else "NONE"
         img.colorspace_settings.is_data = not pass_config.is_color
-
-        # Create Image Material Node:
-        mat_nodes = self.get_target_material().node_tree.nodes
-        self._current_image_node = mat_nodes.new("ShaderNodeTexImage")
-        self._current_image_node.image = img
-        self._current_image_node.select = True
-        mat_nodes.active = self._current_image_node
-
-        if baking_pass == BakingPass.METALLIC:
-            node_tree = self.get_target_material().node_tree
-            bsdf_node = self.get_principled_bsdf_node(node_tree)
-            if bsdf_node == None:
-                log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
-                return
-            self.switch_metallic_and_roughness(node_tree, bsdf_node)
-
-        # Start Baking:
-        self._running_pass = baking_pass
-        pass_str: str = BakingPass.ROUGHNESS.value.type if baking_pass == BakingPass.METALLIC else pass_config.type
-        bpy.ops.object.bake(
-            "INVOKE_DEFAULT",
-            type=pass_str,
-            # Only use color for the DIFFUSE pass, no lighting.
-            pass_filter={"COLOR"},
-            target="IMAGE_TEXTURES",
-            use_clear=True,
-            uv_layer=self.uv_map_prop,
-            margin=self.uv_seam_margin_prop,
-            margin_type="ADJACENT_FACES",
-        )
+        return img
 
     def get_principled_bsdf_node(self: Self, node_tree: ShaderNodeTree) -> ShaderNodeBsdfPrincipled:
         bsdf_nodes = [n for n in node_tree.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"]
