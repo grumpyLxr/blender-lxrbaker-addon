@@ -2,7 +2,7 @@ bl_info = {
     "name": "LxrBaker",
     "description": "Simplify Blender baking workflow",
     "doc_url": "https://github.com/grumpyLxr/blender-lxrbaker-addon",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "author": "grumpyLxr",
     "blender": (3, 5, 0),
     "category": "Render",
