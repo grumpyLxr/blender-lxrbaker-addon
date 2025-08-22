@@ -14,6 +14,7 @@ import importlib
 addon_folder = os.path.basename(os.path.dirname(os.path.realpath(__file__)))
 modules = (
     ".log",
+    ".object_bake_operator_properties",
     ".object_bake_operator",
 )
 
