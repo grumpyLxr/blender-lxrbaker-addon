@@ -1,7 +1,6 @@
 from enum import Enum
-import re
 import time
-from typing import Final, TypeAlias, Self
+from typing import Final, Self
 import bpy
 from bpy.types import (
     Context,
@@ -20,11 +19,9 @@ from bpy.types import (
     Timer,
 )
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+from . import image_utils
 from . import log
 from .object_bake_operator_properties import BakingPass, LxrObjectBakeOperatorProperties
-
-# LxrObjectBakeOperatorProperties: TypeAlias = object_bake_operator_properties.LxrObjectBakeOperatorProperties
-# BakingPass: TypeAlias = object_bake_operator_properties.BakingPass
 
 
 class NodeSocketState:
@@ -159,7 +156,10 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     def cleanup_after_bake(self: Self) -> None:
         # Save all images (should only be one):
         for img in set([i.new_texture_node.image for i in self._material_changes_list]):
-            self.save_result_image(img)
+            try:
+                image_utils.save_result_image(img, self.image_path_prop, self.is_image_save_to_file_prop)
+            except Exception as ex:
+                log.warn(ex.args)
         # Revert all changes to the materials:
         for mat_changes in self._material_changes_list:
             material = mat_changes.material
@@ -231,12 +231,10 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             margin_type="ADJACENT_FACES",
         )
 
-    def get_image(self: Self, img_name: str) -> Image:
-        return bpy.data.images.get(img_name)
 
     def get_or_create_image(self: Self, baking_pass: BakingPass, img_name: str) -> Image:
         pass_config = baking_pass.value
-        img: Image = self.get_image(img_name)
+        img: Image = image_utils.get_image(img_name)
 
         # If the image contains no data we cannot reuse it. Thus we rename it and create a new image.
         if img != None:
@@ -259,10 +257,10 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             if img.size[0] != self.image_width_prop or img.size[1] != self.image_height_prop:
                 log.log("Scaling image to {}x{} ...", self.image_width_prop, self.image_height_prop)
                 # pack the image into the .blend file to not change external image file before the baking.
-                pack_image(img)
+                image_utils.pack_image(img)
                 img.scale(self.image_width_prop, self.image_height_prop)
                 # save scaling
-                pack_image(img)
+                image_utils.pack_image(img)
         img.alpha_mode = "STRAIGHT" if pass_config.use_alpha else "NONE"
         img.colorspace_settings.is_data = not pass_config.is_color
         return img
@@ -291,40 +289,6 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         socket.default_value = state.value
         for connected_socket in state.connected_sockets:
             node_tree.links.new(connected_socket, socket)
-
-    def get_image_path(self: Self, img_name: str) -> str:
-        img_path = re.sub(r"[^\w_.-/]", "_", self.image_path_prop)  # remove illegal characters
-        img_name = bpy.path.clean_name(img_name)  # remove illegal characters
-        return str.format("{}{}.png", img_path if img_path.endswith("/") else img_path + "/", img_name)
-
-    def save_result_image(self: Self, img: Image) -> None:
-        if not img.has_data:
-            log.warn(self, "Cannot save image {} because it has not data.", img.name)
-            return
-        if self.is_image_save_to_file_prop:
-            # We first have to save to an *absolute* path (i.e. not relative to blend file).
-            # Then we can set the filepath property on the image. The reload tests if everything worked.
-            file_path = self.get_image_path(img.name)
-            log.log("Saving image '{}' to file: {}", img.name, file_path)
-            img.save(filepath=bpy.path.abspath(file_path))
-            if is_image_packed(img):
-                img.unpack(method="REMOVE")
-            img.filepath = file_path
-            img.reload()
-        else:
-            log.log("Packing image '{}' into .blend file.", img.name)
-            pack_image(img)
-
-
-def is_image_packed(img: Image) -> bool:
-    return img.packed_file != None
-
-
-def pack_image(img: Image) -> bool:
-    """Packs the image as embedded data into the .blend file. In case the image is already packed changes are saved."""
-    img.pack()
-    if img.filepath != "":
-        img.filepath = ""
 
 
 def object_texture_bake_menu_draw(menu: Menu, _context: Context) -> None:
