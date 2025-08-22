@@ -58,8 +58,9 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     # When calling the baking operator it may take some time until Blender reports that the baking is in progrss.
     # We wait at least the given amount of time until we check if the baking process is done.
     _MIN_BAKE_TIME: float = 2.0
-
     _CUSTOM_PROP_NAME: Final[str] = "lxrbaker_properties"
+
+    _previous_render_engine: str = ""
     _pass_queue: list[BakingPass] = []
     _num_passes: int = 0
     _running_pass: BakingPass = None
@@ -128,6 +129,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             if self._timer != None:
                 context.window_manager.event_timer_remove(self._timer)
             self.cleanup_after_bake()
+            context.scene.render.engine = self._previous_render_engine
             bpy.context.workspace.status_text_set(text=None)
         return result
 
@@ -139,6 +141,10 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         self._running_pass = None
         context.window_manager.modal_handler_add(self)
         context.window_manager.event_timer_add(self._TIMER_INTERVAL_SECONDS, window=context.window)
+        self._previous_render_engine = context.scene.render.engine
+        if self._previous_render_engine.upper() != "CYCLES":
+            log.log("Changing rendering engine from {} to CYCLES.", self._previous_render_engine)
+            context.scene.render.engine = "CYCLES"
         return {"RUNNING_MODAL"}
 
     def bake_next_pass(self: Self) -> set[str]:
@@ -230,7 +236,6 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             margin=self.uv_seam_margin_prop,
             margin_type="ADJACENT_FACES",
         )
-
 
     def get_or_create_image(self: Self, baking_pass: BakingPass, img_name: str) -> Image:
         pass_config = baking_pass.value
