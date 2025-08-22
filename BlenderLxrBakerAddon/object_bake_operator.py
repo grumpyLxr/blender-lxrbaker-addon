@@ -1,5 +1,6 @@
 from enum import Enum
 import re
+import time
 from typing import Final, Iterable, Self
 import bpy
 from bpy.types import (
@@ -10,8 +11,10 @@ from bpy.types import (
     Material,
     Menu,
     NodeSocketFloat,
+    NodeSocket,
     Object,
     Operator,
+    ShaderNode,
     ShaderNodeBsdfPrincipled,
     ShaderNodeTexImage,
     ShaderNodeTree,
@@ -230,6 +233,28 @@ class LxrObjectBakeOperatorProperties:
                 c2.label(text="  \u2022 " + img_name)
 
 
+class NodeSocketState:
+    value: float
+    connected_sockets: list[NodeSocket]
+
+    def __init__(self: Self, value: float, connected_sockets: list[NodeSocket]):
+        self.value = value
+        self.connected_sockets = connected_sockets
+
+
+class MaterialChanges:
+    material: Material
+    new_texture_node: ShaderNodeTexImage
+    metallic_socket: NodeSocketState
+    roughness_socket: NodeSocketState
+
+    def __init__(self: Self, material: Material, new_texture_node: ShaderNodeTexImage):
+        self.material = material
+        self.new_texture_node = new_texture_node
+        self.metallic_socket = None
+        self.roughness_socket = None
+
+
 class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     """Bakes the material to textures"""
 
@@ -237,16 +262,20 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     bl_label = "Bake Material to Textures (LxrBaker)"
     bl_options = {"REGISTER"}
 
-    # The interval in seconds between timer events. Do not set this too low because that makes the baking process 
+    # The interval in seconds between timer events. Do not set this too low because that makes the baking process
     # unstable.
-    _TIMER_INTERVAL_SECONDS: float = 2.5
-    
+    _TIMER_INTERVAL_SECONDS: float = 1.0
+    # When calling the baking operator it may take some time until Blender reports that the baking is in progrss.
+    # We wait at least the given amount of time until we check if the baking process is done.
+    _MIN_BAKE_TIME: float = 2.0
+
     _CUSTOM_PROP_NAME: Final[str] = "lxrbaker_properties"
     _pass_queue: list[BakingPass] = []
     _num_passes: int = 0
     _running_pass: BakingPass = None
     _timer: Timer = None
-    _current_image_nodes: list[tuple[Material, ShaderNodeTexImage]] = []
+    _pass_start_time: float = 0.0
+    _material_changes_list: list[MaterialChanges] = []
 
     @classmethod
     def poll(cls, context: Context) -> bool:
@@ -291,8 +320,8 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         result: set[str] = {"PASS_THROUGH"}  # default: ignore event
         if event.type == "TIMER":
             result = self.bake_next_pass()
-            if len(self._current_image_nodes) > 0:
-                image_names = ",".join(list(set([n[1].image.name for n in self._current_image_nodes])))
+            if len(self._material_changes_list) > 0:
+                image_names = ",".join(list(set([n.new_texture_node.image.name for n in self._material_changes_list])))
                 pass_number = self._num_passes - len(self._pass_queue)
                 status_txt = str.format(
                     "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
@@ -323,7 +352,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         return {"RUNNING_MODAL"}
 
     def bake_next_pass(self: Self) -> set[str]:
-        if bpy.app.is_job_running("OBJECT_BAKE"):
+        if bpy.app.is_job_running("OBJECT_BAKE") or (time.time() - self._pass_start_time) < self._MIN_BAKE_TIME:
             return {"RUNNING_MODAL"}
 
         self.cleanup_after_bake()
@@ -335,16 +364,24 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         return {"RUNNING_MODAL"}
 
     def cleanup_after_bake(self: Self) -> None:
-        for img in set([i[1].image for i in self._current_image_nodes]):
+        # Save all images (should only be one):
+        for img in set([i.new_texture_node.image for i in self._material_changes_list]):
             self.save_result_image(img)
-        for img_node_tuple in self._current_image_nodes:
-            img_node_tuple[0].node_tree.nodes.remove(img_node_tuple[1])
-        self._current_image_nodes = []
-        if self._running_pass == BakingPass.METALLIC:
-            for material in self.get_target_materials():
-                bsdf_node = self.get_principled_bsdf_node(material.node_tree)
-                if bsdf_node != None:
-                    self.switch_metallic_and_roughness(material.node_tree, bsdf_node)
+        # Revert all changes to the materials:
+        for mat_changes in self._material_changes_list:
+            material = mat_changes.material
+            mat_changes.material.node_tree.nodes.remove(mat_changes.new_texture_node)
+            bsdf_node = self.get_principled_bsdf_node(material.node_tree)
+            if bsdf_node != None:
+                if mat_changes.metallic_socket != None:
+                    self.restore_node_input_connections(
+                        material.node_tree, bsdf_node, "Metallic", mat_changes.metallic_socket
+                    )
+                if mat_changes.roughness_socket != None:
+                    self.restore_node_input_connections(
+                        material.node_tree, bsdf_node, "Roughness", mat_changes.roughness_socket
+                    )
+        self._material_changes_list = []
         self._running_pass = None
 
     def bake_image_pass(self: Self, baking_pass: BakingPass) -> None:
@@ -356,23 +393,38 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
 
         # Create Image Material Nodes:
         for material in self.get_target_materials():
-            log.log("Creating tex node for material {}", material.name)
             node_tree = material.node_tree
             img_node: ShaderNodeTexImage = node_tree.nodes.new("ShaderNodeTexImage")
             img_node.image = img
             img_node.select = True
             node_tree.nodes.active = img_node
-            self._current_image_nodes.append((material, img_node))
+            material_changes = MaterialChanges(material, img_node)
 
+            bsdf_node = self.get_principled_bsdf_node(node_tree)
             if baking_pass == BakingPass.METALLIC:
-                bsdf_node = self.get_principled_bsdf_node(node_tree)
                 if bsdf_node == None:
                     log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
                     return
-                self.switch_metallic_and_roughness(node_tree, bsdf_node)
+                # Switch Metallic and Roughness input sockets on Principled BSDF Node.
+                material_changes.metallic_socket = self.remove_node_input_connections(
+                    node_tree, bsdf_node, "Metallic", 0.0
+                )
+                material_changes.roughness_socket = self.remove_node_input_connections(
+                    node_tree, bsdf_node, "Roughness", 0.0
+                )
+                self.restore_node_input_connections(node_tree, bsdf_node, "Metallic", material_changes.roughness_socket)
+                self.restore_node_input_connections(node_tree, bsdf_node, "Roughness", material_changes.metallic_socket)
+            elif bsdf_node != None:
+                # Remove connections from Metallic input socket on Principled BSDF Node. When baking the diffuse pass
+                # the metallic value influences the result. And we don't want this.
+                material_changes.metallic_socket = self.remove_node_input_connections(
+                    node_tree, bsdf_node, "Metallic", 0.0
+                )
+            self._material_changes_list.append(material_changes)
 
         # Start Baking:
         self._running_pass = baking_pass
+        self._pass_start_time = time.time()
         pass_str: str = BakingPass.ROUGHNESS.value.type if baking_pass == BakingPass.METALLIC else pass_config.type
         bpy.ops.object.bake(
             "INVOKE_DEFAULT",
@@ -395,6 +447,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
 
         # If the image contains no data we cannot reuse it. Thus we rename it and create a new image.
         if img != None:
+            img.update()  # Try to load the image if it was not loaded before.
             wrong_alpha = pass_config.use_alpha if img.alpha_mode == "NONE" else not pass_config.use_alpha
             if not img.has_data or wrong_alpha or img.type != "IMAGE":
                 old_name = img.name
@@ -427,26 +480,24 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             log.warn(self, "Baked metallic pass might be wrong. Found more than one Principled BSDF Node.")
         return None if len(bsdf_nodes) == 0 else bsdf_nodes[0]
 
-    def switch_metallic_and_roughness(
-        self: Self, node_tree: ShaderNodeTree, bsdf_node: ShaderNodeBsdfPrincipled
+    def remove_node_input_connections(
+        self: Self, node_tree: ShaderNodeTree, node: ShaderNode, socket_name: str, new_value: float
+    ) -> NodeSocketState:
+        socket: NodeSocketFloat = node.inputs.get(socket_name)
+        value = socket.default_value
+        socket.default_value = new_value
+        linked_sockets = [s.from_socket for s in socket.links]
+        for socket in socket.links:
+            node_tree.links.remove(socket)
+        return NodeSocketState(value, linked_sockets)
+
+    def restore_node_input_connections(
+        self: Self, node_tree: ShaderNodeTree, node: ShaderNode, socket_name: str, state: NodeSocketState
     ) -> None:
-        metallic: NodeSocketFloat = bsdf_node.inputs.get("Metallic")
-        roughness: NodeSocketFloat = bsdf_node.inputs.get("Roughness")
-        # Switch default value:
-        metallic_value = metallic.default_value
-        metallic.default_value = roughness.default_value
-        roughness.default_value = metallic_value
-        # Switch connected nodes:
-        metallic_linked_sockets = [s.from_socket for s in metallic.links]
-        roughness_linked_sockets = [s.from_socket for s in roughness.links]
-        for socket in metallic.links:
-            node_tree.links.remove(socket)
-        for socket in roughness.links:
-            node_tree.links.remove(socket)
-        for socket in metallic_linked_sockets:
-            node_tree.links.new(socket, roughness)
-        for socket in roughness_linked_sockets:
-            node_tree.links.new(socket, metallic)
+        socket: NodeSocketFloat = node.inputs.get(socket_name)
+        socket.default_value = state.value
+        for connected_socket in state.connected_sockets:
+            node_tree.links.new(connected_socket, socket)
 
     def get_image_path(self: Self, img_name: str) -> str:
         img_path = re.sub(r"[^\w_.-/]", "_", self.image_path_prop)  # remove illegal characters
