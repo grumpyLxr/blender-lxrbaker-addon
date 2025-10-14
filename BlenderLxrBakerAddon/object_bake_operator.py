@@ -292,6 +292,10 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     ) -> None:
         socket: NodeSocketFloat = node.inputs.get(socket_name)
         socket.default_value = state.value
+        # First remove existing links from socket:
+        for socket in socket.links:
+            node_tree.links.remove(socket)
+         # Then add (aka restore) the links from the NodeSocketState
         for connected_socket in state.connected_sockets:
             node_tree.links.new(connected_socket, socket)
 
