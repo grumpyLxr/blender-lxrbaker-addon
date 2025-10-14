@@ -126,11 +126,13 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             result = {"CANCELLED"}
 
         if "FINISHED" in result or "CANCELLED" in result:
+            log.log("Baking finished with result {}. Cleaning up ...", result)
             if self._timer != None:
                 context.window_manager.event_timer_remove(self._timer)
             self.cleanup_after_bake()
             context.scene.render.engine = self._previous_render_engine
             bpy.context.workspace.status_text_set(text=None)
+            log.log("Finsihed cleaning up ...")
         return result
 
     def execute(self: Self, context: Context) -> set[str]:
