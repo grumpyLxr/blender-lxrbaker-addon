@@ -103,7 +103,7 @@ class LxrObjectBakeOperatorProperties:
         self.image_path_prop = "//"
         self.image_width_prop = 1024
         self.image_height_prop = 1024
-        self.uv_seam_margin_prop = bpy.context.scene.render.bake_margin
+        self.uv_seam_margin_prop = bpy.context.scene.render.bake.margin
         self.uv_map_prop = "NONE"
         self.is_diffuse_pass_prop = True
         self.is_alpha_pass_prop = False
