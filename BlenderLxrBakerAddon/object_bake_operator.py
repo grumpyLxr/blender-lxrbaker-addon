@@ -116,7 +116,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             result = self.bake_next_pass()
             if self._material_changes != None:
                 try:
-                    image_names = ",".join([n.image.name for n in self._material_changes.new_texture_nodes])
+                    image_names = ",".join(set([n.image.name for n in self._material_changes.new_texture_nodes]))
                     pass_number = self._num_passes - len(self._pass_queue)
                     status_txt = str.format(
                         "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
@@ -141,8 +141,20 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             self.cleanup_after_bake()
             log.log("... Data cleaned")
             if self._previous_render_engine != "":
-                context.scene.render.engine = self._previous_render_engine
-                log.log("... Restored rendering engine to {}", self._previous_render_engine)
+                target_engine = self._previous_render_engine
+                def _deferred_engine_switch():
+                    try:
+                        log.log("Restoring rendering engine to {} ...", target_engine)
+                        bpy.context.scene.render.engine = target_engine
+                        log.log("Restored rendering engine to {}.", target_engine)
+                    except Exception as ex:
+                        # We cannot use log.warn() because self is invalid at this point
+                        print(f"Failed to reset render engine to {target_engine}: {ex}")
+                    return None  # Returning None unregisters the timer
+                # Defer engine switch by 0.2 seconds after modal completion to avoid a deadlock when
+                # background Bake Job is still releasing locks
+                if context.scene.render.engine != self._previous_render_engine:
+                    bpy.app.timers.register(_deferred_engine_switch, first_interval=0.2)
                 self._previous_render_engine = ""
             bpy.context.workspace.status_text_set(text=None)
             log.log("Finished cleaning up!")
