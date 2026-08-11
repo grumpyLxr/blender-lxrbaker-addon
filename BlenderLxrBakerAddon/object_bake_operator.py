@@ -1,6 +1,6 @@
 from enum import Enum
 import time
-from typing import Final, Self
+from typing import Final, Self, cast
 import bpy
 from bpy.types import (
     Context,
@@ -10,6 +10,7 @@ from bpy.types import (
     Menu,
     NodeSocketFloat,
     NodeSocket,
+    ShaderNodeGroup,
     Object,
     Operator,
     ShaderNode,
@@ -25,25 +26,27 @@ from .object_bake_operator_properties import BakingPass, LxrObjectBakeOperatorPr
 
 
 class NodeSocketState:
-    value: float
-    connected_sockets: list[NodeSocket]
-
     def __init__(self: Self, value: float, connected_sockets: list[NodeSocket]):
-        self.value = value
-        self.connected_sockets = connected_sockets
+        self.value: float = value
+        self.connected_sockets: list[NodeSocket] = connected_sockets
+
+
+class BsdfChanges:
+    """Changes to a ShaderNodeBsdfPrincipled made during baking"""
+    def __init__(self: Self):
+        self.metallic_socket: NodeSocketState | None = None
+        self.roughness_socket: NodeSocketState | None = None
 
 
 class MaterialChanges:
-    material: Material
-    new_texture_node: ShaderNodeTexImage
-    metallic_socket: NodeSocketState
-    roughness_socket: NodeSocketState
+    """Keeps track of all changes the materials that the operator does while baking. These changes are reverted when
+    the baking is finished."""
+    def __init__(self: Self):
+         # A list of all temporary texture nodes that were created
+        self.new_texture_nodes: list[ShaderNodeTexImage] = []
+        # The changes to the BSDF Prinicpled nodes
+        self.bsdf_changes: dict[ShaderNodeBsdfPrincipled, BsdfChanges] = {}
 
-    def __init__(self: Self, material: Material, new_texture_node: ShaderNodeTexImage):
-        self.material = material
-        self.new_texture_node = new_texture_node
-        self.metallic_socket = None
-        self.roughness_socket = None
 
 
 class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
@@ -66,7 +69,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
     _running_pass: BakingPass = None
     _timer: Timer = None
     _pass_start_time: float = 0.0
-    _material_changes_list: list[MaterialChanges] = []
+    _material_changes: MaterialChanges = None
 
     @classmethod
     def poll(cls, context: Context) -> bool:
@@ -111,16 +114,21 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         result: set[str] = {"PASS_THROUGH"}  # default: ignore event
         if event.type == "TIMER":
             result = self.bake_next_pass()
-            if len(self._material_changes_list) > 0:
-                image_names = ",".join(list(set([n.new_texture_node.image.name for n in self._material_changes_list])))
-                pass_number = self._num_passes - len(self._pass_queue)
-                status_txt = str.format(
-                    "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
-                    pass_number,
-                    self._num_passes,
-                    image_names,
-                )
-                bpy.context.workspace.status_text_set(text=status_txt)
+            if self._material_changes != None:
+                try:
+                    image_names = ",".join([n.image.name for n in self._material_changes.new_texture_nodes])
+                    pass_number = self._num_passes - len(self._pass_queue)
+                    status_txt = str.format(
+                        "\U0001f35e Baking ({}/{}): {} | Press END to cancel baking after current pass.",
+                        pass_number,
+                        self._num_passes,
+                        image_names,
+                    )
+                    bpy.context.workspace.status_text_set(text=status_txt)
+                except Exception as ex:
+                    # Log and otherwise ignore all exceptions because failing to set the status text is not a 
+                    # critical error.
+                    log.warn(self, str(ex))
         elif event.type == "ESC" or event.type == "END":
             log.warn(self, "Baking was cancelled.")
             result = {"CANCELLED"}
@@ -129,10 +137,15 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
             log.log("Baking finished with result {}. Cleaning up ...", result)
             if self._timer != None:
                 context.window_manager.event_timer_remove(self._timer)
+            log.log("... Timer removed")
             self.cleanup_after_bake()
-            context.scene.render.engine = self._previous_render_engine
+            log.log("... Data cleaned")
+            if self._previous_render_engine != "":
+                context.scene.render.engine = self._previous_render_engine
+                log.log("... Restored rendering engine to {}", self._previous_render_engine)
+                self._previous_render_engine = ""
             bpy.context.workspace.status_text_set(text=None)
-            log.log("Finsihed cleaning up ...")
+            log.log("Finished cleaning up!")
         return result
 
     def execute(self: Self, context: Context) -> set[str]:
@@ -142,7 +155,7 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         self._num_passes = len(self._pass_queue)
         self._running_pass = None
         context.window_manager.modal_handler_add(self)
-        context.window_manager.event_timer_add(self._TIMER_INTERVAL_SECONDS, window=context.window)
+        self._timer = context.window_manager.event_timer_add(self._TIMER_INTERVAL_SECONDS, window=context.window)
         self._previous_render_engine = context.scene.render.engine
         if self._previous_render_engine.upper() != "CYCLES":
             log.log("Changing rendering engine from {} to CYCLES.", self._previous_render_engine)
@@ -162,66 +175,81 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         return {"RUNNING_MODAL"}
 
     def cleanup_after_bake(self: Self) -> None:
-        # Save all images (should only be one):
-        for img in set([i.new_texture_node.image for i in self._material_changes_list]):
-            try:
-                image_utils.save_result_image(img, self.image_path_prop, self.is_image_save_to_file_prop)
-            except Exception as ex:
-                log.warn(ex.args)
-        # Revert all changes to the materials:
-        for mat_changes in self._material_changes_list:
-            material = mat_changes.material
-            mat_changes.material.node_tree.nodes.remove(mat_changes.new_texture_node)
-            bsdf_node = self.get_principled_bsdf_node(material.node_tree)
-            if bsdf_node != None:
-                if mat_changes.metallic_socket != None:
-                    self.restore_node_input_connections(
-                        material.node_tree, bsdf_node, "Metallic", mat_changes.metallic_socket
-                    )
-                if mat_changes.roughness_socket != None:
-                    self.restore_node_input_connections(
-                        material.node_tree, bsdf_node, "Roughness", mat_changes.roughness_socket
-                    )
-        self._material_changes_list = []
+        mat_changes = self._material_changes
+        if mat_changes != None:
+            # Save all images:
+            for img in set([n.image for n in mat_changes.new_texture_nodes]):
+                try:
+                    image_utils.save_result_image(img, self.image_path_prop, self.is_image_save_to_file_prop)
+                except Exception as ex:
+                    log.warn(self, str(ex))
+            # Revert all changes to the materials:
+            for tex_node in mat_changes.new_texture_nodes:
+                log.log("Removing temporary image node: {}", tex_node.name)   
+                texture_node_tree: ShaderNodeTree = self.get_node_tree(tex_node) # Retrieve the parent ShaderNodeTree
+                texture_node_tree.nodes.remove(tex_node)
+            for bsdf_node, bsdf_node_changes in mat_changes.bsdf_changes.items():
+                log.log("Restoring connections on node: {}", [bsdf_node.name, self.get_node_tree(bsdf_node).name] )
+                if bsdf_node_changes.metallic_socket != None:
+                    self.restore_node_input_connections(bsdf_node, "Metallic", bsdf_node_changes.metallic_socket)
+                if bsdf_node_changes.roughness_socket != None:
+                    self.restore_node_input_connections(bsdf_node, "Roughness", bsdf_node_changes.roughness_socket)
+        self._material_changes = None
         self._running_pass = None
 
     def bake_image_pass(self: Self, baking_pass: BakingPass) -> None:
         pass_config = baking_pass.value
-
+        material_changes = MaterialChanges()
+        
         # Get or create Image:
         img_name: str = self.get_image_name(baking_pass)
         img = self.get_or_create_image(baking_pass, img_name)
 
-        # Create Image Material Nodes:
+        # Create Image Material Nodes and find BSDF Principled nodes:
+        all_bsdf_nodes: set[ShaderNodeBsdfPrincipled] = set()
         for material in LxrObjectBakeOperator.get_valid_materials(self.get_target_object()):
             node_tree = material.node_tree
             img_node: ShaderNodeTexImage = node_tree.nodes.new("ShaderNodeTexImage")
             img_node.image = img
             img_node.select = True
             node_tree.nodes.active = img_node
-            material_changes = MaterialChanges(material, img_node)
-
-            bsdf_node = self.get_principled_bsdf_node(node_tree)
-            if baking_pass == BakingPass.METALLIC:
-                if bsdf_node == None:
-                    log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
-                    return
+            material_changes.new_texture_nodes.append(img_node)
+            all_bsdf_nodes.update(self.get_principled_bsdf_nodes(node_tree))
+        
+        log.log("Created the following temporary image nodes: {}",  [n.name for n in material_changes.new_texture_nodes])    
+        log.log(
+            "Found the following BSDF Principled shader nodes: {}", 
+            [[n.name, self.get_node_tree(n).name] for n in all_bsdf_nodes]
+        )
+        if baking_pass == BakingPass.METALLIC:
+            if len(all_bsdf_nodes) == 0:
+                log.warn(self, "Cannot bake metallic pass. Could not find Principled BSDF Node.")
+                return
+            for bsdf_node in all_bsdf_nodes:
                 # Switch Metallic and Roughness input sockets on Principled BSDF Node.
-                material_changes.metallic_socket = self.remove_node_input_connections(
-                    node_tree, bsdf_node, "Metallic", 0.0
+                log.log(
+                    "Switching Metallic and Roughness input sockets on node: {}", 
+                    [bsdf_node.name, self.get_node_tree(bsdf_node).name]
                 )
-                material_changes.roughness_socket = self.remove_node_input_connections(
-                    node_tree, bsdf_node, "Roughness", 0.0
-                )
-                self.restore_node_input_connections(node_tree, bsdf_node, "Metallic", material_changes.roughness_socket)
-                self.restore_node_input_connections(node_tree, bsdf_node, "Roughness", material_changes.metallic_socket)
-            elif bsdf_node != None:
+                bsdf_changes = BsdfChanges()
+                material_changes.bsdf_changes[bsdf_node] = bsdf_changes
+                bsdf_changes.metallic_socket = self.remove_node_input_connections(bsdf_node, "Metallic", 0.0)
+                bsdf_changes.roughness_socket = self.remove_node_input_connections(bsdf_node, "Roughness", 0.0)
+                self.restore_node_input_connections(bsdf_node, "Metallic", bsdf_changes.roughness_socket)
+                self.restore_node_input_connections(bsdf_node, "Roughness", bsdf_changes.metallic_socket)
+        else: 
+            for bsdf_node in all_bsdf_nodes:
                 # Remove connections from Metallic input socket on Principled BSDF Node. When baking the diffuse pass
                 # the metallic value influences the result. And we don't want this.
-                material_changes.metallic_socket = self.remove_node_input_connections(
-                    node_tree, bsdf_node, "Metallic", 0.0
+                log.log(
+                    "Removing connections from Metallic input socket on node: {}", 
+                    [bsdf_node.name, self.get_node_tree(bsdf_node).name]
                 )
-            self._material_changes_list.append(material_changes)
+                bsdf_changes = BsdfChanges()
+                material_changes.bsdf_changes[bsdf_node] = bsdf_changes
+                bsdf_changes.metallic_socket = self.remove_node_input_connections(bsdf_node, "Metallic", 0.0)
+                
+        self._material_changes = material_changes
 
         # Start Baking:
         self._running_pass = baking_pass
@@ -272,34 +300,48 @@ class LxrObjectBakeOperator(Operator, LxrObjectBakeOperatorProperties):
         img.colorspace_settings.is_data = not pass_config.is_color
         return img
 
-    def get_principled_bsdf_node(self: Self, node_tree: ShaderNodeTree) -> ShaderNodeBsdfPrincipled:
-        bsdf_nodes = [n for n in node_tree.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"]
-        if len(bsdf_nodes) > 1:
-            log.warn(self, "Baked metallic pass might be wrong. Found more than one Principled BSDF Node.")
-        return None if len(bsdf_nodes) == 0 else bsdf_nodes[0]
 
-    def remove_node_input_connections(
-        self: Self, node_tree: ShaderNodeTree, node: ShaderNode, socket_name: str, new_value: float
-    ) -> NodeSocketState:
+    def get_principled_bsdf_nodes(self: Self, node_tree: ShaderNodeTree) -> set[ShaderNodeBsdfPrincipled]:
+        principled_nodes: set[ShaderNodeBsdfPrincipled] = set()
+        if not node_tree:
+            return set()
+        for n in node_tree.nodes:
+            if n.bl_idname == "ShaderNodeBsdfPrincipled":
+                principled_nodes.add(cast(ShaderNodeBsdfPrincipled, n))
+            elif n.bl_idname == "ShaderNodeGroup":
+                group_node = cast(ShaderNodeGroup, n)
+                principled_nodes.update(self.get_principled_bsdf_nodes(group_node.node_tree))
+        return principled_nodes
+
+    def remove_node_input_connections(self: Self, node: ShaderNode, socket_name: str, new_value: float) -> NodeSocketState:
+        node_tree: ShaderNodeTree = self.get_node_tree(node) # Retrieve the parent ShaderNodeTree
         socket: NodeSocketFloat = node.inputs.get(socket_name)
+        if socket is None or not socket.bl_idname.startswith("NodeSocketFloat"):
+            log.warn(self, "Cannot remove node input connection because socket {} is not a NodeSocketFloat", socket_name)
+            return NodeSocketState(0.0, [])
         value = socket.default_value
         socket.default_value = new_value
         linked_sockets = [s.from_socket for s in socket.links]
-        for socket in socket.links:
-            node_tree.links.remove(socket)
+        for node_link in socket.links:
+            node_tree.links.remove(node_link)
         return NodeSocketState(value, linked_sockets)
 
-    def restore_node_input_connections(
-        self: Self, node_tree: ShaderNodeTree, node: ShaderNode, socket_name: str, state: NodeSocketState
-    ) -> None:
+    def restore_node_input_connections(self: Self, node: ShaderNode, socket_name: str, state: NodeSocketState) -> None:
+        node_tree: ShaderNodeTree = self.get_node_tree(node) # Retrieve the parent ShaderNodeTree
         socket: NodeSocketFloat = node.inputs.get(socket_name)
+        if socket is None or not socket.bl_idname.startswith("NodeSocketFloat"):
+            log.warn(self, "Cannot restore node input connection because socket {} is not a NodeSocketFloat", socket_name)
+            return
         socket.default_value = state.value
         # First remove existing links from socket:
-        for socket in socket.links:
-            node_tree.links.remove(socket)
+        for node_link in socket.links:
+            node_tree.links.remove(node_link)
          # Then add (aka restore) the links from the NodeSocketState
         for connected_socket in state.connected_sockets:
             node_tree.links.new(connected_socket, socket)
+            
+    def get_node_tree(self: Self, node: ShaderNode) -> ShaderNodeTree:
+        return node.id_data
 
 
 def object_texture_bake_menu_draw(menu: Menu, _context: Context) -> None:
